@@ -1017,6 +1017,8 @@ async function finishEnrolment(){
       var d=null; try{ d=await r.json(); }catch(e2){}
       if(!r.ok || !d || d.error){
         if(d && d.error==='too_early'){ showToast('Please continue with the module a little longer'); startAglmTimer(); return; }
+        if(d && d.error==='not_started'){ showToast('Module timer restarted. Please continue with the module.'); btn.textContent='Complete'; startAglmTimer(); return; }
+        if(d && d.error==='not_ready'){ btn.disabled=false; btn.textContent='Complete'; showToast('Your enrolment is not complete yet. Please contact the study team.'); return; }
         btn.disabled=false; btn.textContent='Complete';
         showToast('Could not record completion ('+((d&&d.error)||('HTTP '+r.status))+'). Please try again.'); return;
       }
