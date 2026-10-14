@@ -710,6 +710,7 @@ function openModal(id){ document.getElementById(id).classList.add('active'); }
 function closeModal(id){ document.getElementById(id).classList.remove('active'); }
 function hdr(json){ var h={'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+(supabaseSession?supabaseSession.access_token:SUPABASE_ANON_KEY)}; if(json) h['Content-Type']='application/json'; return h; }
 function loginError(m){ var e=document.getElementById('login-error'); e.textContent=m; e.style.display='block'; }
+function escHtml(v){ return String(v==null?'':v).replace(/[&<>"']/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 function loginSuccess(html){ var s=document.getElementById('login-success'); s.innerHTML=html; s.style.display='block'; }
 
 // ---- auth tabs ----
@@ -747,7 +748,7 @@ async function doSignup(){
     if(exists){ loginError('An account with this email already exists. Please use the Reader Login tab.'); btn.disabled=false; btn.textContent='Register →'; return; }
     var su=await sbClient.auth.signUp({ email:email, password:p1, options:{ emailRedirectTo: window.location.origin + window.location.pathname, data:{ ahpra_number:ahpra, stage:STAGE } } });
     if(su.error){ loginError('Registration failed: '+su.error.message); btn.disabled=false; btn.textContent='Register →'; return; }
-    loginSuccess('✓ Almost there! We have sent a confirmation email to <strong>'+email+'</strong>.<br><br>Click the link in that email to verify your address, then return and use the <strong>Reader Login</strong> tab. Your ARGUS ID is assigned automatically once your email is confirmed and the study team has verified your registration.');
+    loginSuccess('✓ Almost there! We have sent a confirmation email to <strong>'+escHtml(email)+'</strong>.<br><br>Click the link in that email to verify your address, then return and use the <strong>Reader Login</strong> tab. Your ARGUS ID is assigned automatically once your email is confirmed and the study team has verified your registration.');
     document.getElementById('signup-fields').style.display='none';
   }catch(e){ loginError('Unexpected error: '+e.message); }
   btn.disabled=false; btn.textContent='Register →';
@@ -777,7 +778,7 @@ async function doSignin(){
 async function doForgotPassword(){
   var email=document.getElementById('forgot-email').value.trim().toLowerCase();
   if(!email){ loginError('Please enter your email address.'); return; }
-  try{ await sbClient.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + window.location.pathname }); loginSuccess('✓ If an account exists for '+email+', a password reset link has been sent.'); }
+  try{ await sbClient.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + window.location.pathname }); loginSuccess('✓ If an account exists for '+escHtml(email)+', a password reset link has been sent.'); }
   catch(e){ loginError('Error: '+e.message); }
 }
 async function doResetPassword(){
@@ -825,7 +826,7 @@ async function afterLogin(){
   }catch(e){ rpcErr=e.message||'network error'; }
   if(!row){
     readerId='';
-    renderGate({manual_verification:false},confirmed,'We could not load your reader record ('+rpcErr+'). Please sign out and sign in again. If this keeps happening, contact the study team.',true);
+    renderGate({manual_verification:false},confirmed,'We could not load your reader record ('+escHtml(rpcErr)+'). Please sign out and sign in again. If this keeps happening, contact the study team.',true);
     return;
   }
   readerId=row.reader_id;
@@ -1006,8 +1007,23 @@ function openAGLM(){ setEnrolStep(3); document.getElementById('aglm-frame').src=
 async function finishEnrolment(){
   if(aglmDeadline && Date.now()<aglmDeadline) return;   // timer not finished
   clearInterval(aglmTimer);
+  var btn=document.getElementById('btn-aglm-complete'); btn.disabled=true; btn.textContent='Checking\u2026';
+  try{
+    await syncSession();
+    var r=await fetch(SUPABASE_URL+'/rest/v1/rpc/complete_video',{method:'POST',headers:hdr(true),body:JSON.stringify({ p_reader_id:readerId })});
+    if(r.status===404){   // patch12 not applied yet: legacy path
+      await fetch(SUPABASE_URL+'/rest/v1/reader_registry?reader_id=eq.'+encodeURIComponent(readerId),{method:'PATCH',headers:Object.assign(hdr(true),{'Prefer':'return=minimal'}),body:JSON.stringify({ video_complete:true })});
+    } else {
+      var d=null; try{ d=await r.json(); }catch(e2){}
+      if(!r.ok || !d || d.error){
+        if(d && d.error==='too_early'){ showToast('Please continue with the module a little longer'); startAglmTimer(); return; }
+        btn.disabled=false; btn.textContent='Complete';
+        showToast('Could not record completion ('+((d&&d.error)||('HTTP '+r.status))+'). Please try again.'); return;
+      }
+    }
+  }catch(e){ btn.disabled=false; btn.textContent='Complete'; showToast('Network error. Please try again.'); return; }
+  btn.disabled=false; btn.textContent='Complete';
   document.getElementById('aglm-frame').src=''; document.getElementById('aglm-modal').classList.remove('active');
-  await fetch(SUPABASE_URL+'/rest/v1/reader_registry?reader_id=eq.'+encodeURIComponent(readerId),{method:'PATCH',headers:Object.assign(hdr(true),{'Prefer':'return=minimal'}),body:JSON.stringify({ video_complete:true })});  // full_enrolment_complete is derived server-side, never sent
   enterStudy();
 }
 
@@ -1024,9 +1040,12 @@ async function enterStudy(){
 function recordCaseOrder(){
   // Writes this reader's presented sequence once (filter case_order=is.null), for the randomisation record.
   try{
-    fetch(SUPABASE_URL+'/rest/v1/reader_registry?reader_id=eq.'+encodeURIComponent(readerId)+'&case_order=is.null',
-      {method:'PATCH',headers:Object.assign(hdr(true),{'Prefer':'return=minimal'}),
-       body:JSON.stringify({ case_order:CASES.map(function(c){ return c.id; }), case_order_time:ts() })}).catch(function(){});
+    var order=CASES.map(function(c){ return c.id; });
+    fetch(SUPABASE_URL+'/rest/v1/rpc/set_case_order',{method:'POST',headers:hdr(true),body:JSON.stringify({ p_reader_id:readerId, p_order:order })})
+      .then(function(r){ if(r.status===404){   // patch12 not applied yet: legacy path
+        return fetch(SUPABASE_URL+'/rest/v1/reader_registry?reader_id=eq.'+encodeURIComponent(readerId)+'&case_order=is.null',
+          {method:'PATCH',headers:Object.assign(hdr(true),{'Prefer':'return=minimal'}),body:JSON.stringify({ case_order:order, case_order_time:ts() })}); } })
+      .catch(function(){});
   }catch(e){}
 }
 function buildCases(){
